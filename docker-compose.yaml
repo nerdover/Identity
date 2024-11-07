@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: nerdwiki_identity
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=Ss123!@#
+      - MSSQL_PID=Express
+    ports:
+      - "4201:1433"
+    volumes:
+      - nerdwiki_identity_sql:/var/opt/mssql
+    networks:
+      - backend
+
+volumes:
+  nerdwiki_identity_sql:
+
+networks:
+  backend:
+    driver: bridge
