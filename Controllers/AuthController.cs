@@ -1,9 +1,12 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
+using Identity.Data;
 using Identity.Data.Entities;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Identity.Controllers;
@@ -13,12 +16,14 @@ namespace Identity.Controllers;
 public class AuthController(
     UserManager<ApplicationUser> userManager,
     SignInManager<ApplicationUser> signInManager,
-    IConfiguration configuration
+    IConfiguration configuration,
+    ApplicationDbContext context
 ) : ControllerBase
 {
     private readonly UserManager<ApplicationUser> _userManager = userManager;
     private readonly SignInManager<ApplicationUser> _signInManager = signInManager;
     private readonly IConfiguration _configuration = configuration;
+    private readonly ApplicationDbContext _context = context;
 
     public record RegisterRequest(string Username, string Email, string Password);
     public record LoginRequest(string Username, string Password);
@@ -53,9 +58,26 @@ public class AuthController(
             return Unauthorized();
         }
 
-        var token = GenerateToken(user);
+        var accessToken = GenerateAccessToken(user);
+        var refreshToken = GenerateRefreshToken();
 
-        return Ok(new { Message = "User signed in successfully.", token });
+        await _userManager.SetAuthenticationTokenAsync(
+            user,
+            _configuration["Jwt:Issuer"]!,
+            "refresh_token",
+            refreshToken
+        );
+
+        var cookieOptions = new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = true,
+            SameSite = SameSiteMode.Strict,
+            Expires = DateTime.Now.AddDays(7)
+        };
+        HttpContext.Response.Cookies.Append("refreshToken", refreshToken, cookieOptions);
+
+        return Ok(new { Message = "User signed in successfully.", accessToken });
     }
 
     [HttpGet]
@@ -65,7 +87,47 @@ public class AuthController(
         return Ok(new { IsAuthenticated = status });
     }
 
-    private string GenerateToken(ApplicationUser user)
+    [HttpPost("refresh")]
+    public async Task<IActionResult> RefreshToken()
+    {
+        var refreshToken = HttpContext.Request.Cookies["refreshToken"];
+        var userToken = await _context.UserTokens.FirstOrDefaultAsync(ut => ut.Value == refreshToken);
+
+        if (userToken is null || userToken.LoginProvider != _configuration["Jwt:Issuer"] || userToken.Name != "refresh_token")
+        {
+            return Unauthorized();
+        }
+
+        var user = await _userManager.FindByIdAsync(userToken.UserId);
+
+        if (user is null)
+        {
+            return Unauthorized();
+        }
+
+        var accessToken = GenerateAccessToken(user);
+        var newRefreshToken = GenerateRefreshToken();
+
+        await _userManager.SetAuthenticationTokenAsync(
+            user,
+            _configuration["Jwt:Issuer"]!,
+            "refresh_token",
+            newRefreshToken
+        );
+
+        var cookieOptions = new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = true,
+            SameSite = SameSiteMode.Strict,
+            Expires = DateTime.Now.AddDays(7)
+        };
+        HttpContext.Response.Cookies.Append("refreshToken", newRefreshToken, cookieOptions);
+
+        return Ok(new { Message = "Refresh token successfully.", accessToken });
+    }
+
+    private string GenerateAccessToken(ApplicationUser user)
     {
         var claims = new[]
         {
@@ -83,5 +145,14 @@ public class AuthController(
         );
 
         return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private static string GenerateRefreshToken()
+    {
+        var randomNumber = new byte[32];
+        using var rng = RandomNumberGenerator.Create();
+        rng.GetBytes(randomNumber);
+
+        return Convert.ToBase64String(randomNumber);
     }
 }
